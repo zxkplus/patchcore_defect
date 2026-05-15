@@ -1,0 +1,11 @@
+__pycache__
+.pytest_cache
+.vscode
+models
+results
+src/patchcore_defect.egg-info/dependency_links.txt
+src/patchcore_defect.egg-info/entry_points.txt
+src/patchcore_defect.egg-info/PKG-INFO
+src/patchcore_defect.egg-info/requires.txt
+src/patchcore_defect.egg-info/SOURCES.txt
+src/patchcore_defect.egg-info/top_level.txt
