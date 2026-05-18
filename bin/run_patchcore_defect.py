@@ -81,8 +81,8 @@ def parse_args():
                               help="Patch 大小")
     
     # 采样参数
-    train_parser.add_argument("--sampler", type=str, default="approximate_greedy_coreset",
-                              choices=["identity", "greedy_coreset", "approximate_greedy_coreset", "random"],
+    train_parser.add_argument("--sampler", type=str, default="greedy_coreset",
+                              choices=["identity", "greedy_coreset", "random"],
                               help="特征采样器类型")
     train_parser.add_argument("--sampler_percentage", type=float, default=0.1,
                               help="采样比例")
@@ -162,11 +162,6 @@ def train_defect_command(args):
         featuresampler = sampler.IdentitySampler()
     elif args.sampler == "greedy_coreset":
         featuresampler = sampler.GreedyCoresetSampler(
-            percentage=args.sampler_percentage,
-            device=device,
-        )
-    elif args.sampler == "approximate_greedy_coreset":
-        featuresampler = sampler.ApproximateGreedyCoresetSampler(
             percentage=args.sampler_percentage,
             device=device,
         )
