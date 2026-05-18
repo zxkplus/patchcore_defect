@@ -113,10 +113,12 @@ def parse_args():
                         help="操作模式：train（训练）或 inference（推理）")
     
     # 数据参数
-    parser.add_argument("--data_path", type=str, required=True,
-                        help="MVTec 数据集路径")
-    parser.add_argument("--category", type=str, required=True,
-                        help="MVTec 类别名称")
+    parser.add_argument("--data_path", type=str, 
+                        help="MVTec 数据集路径（批量推理时必需）")
+    parser.add_argument("--category", type=str, 
+                        help="MVTec 类别名称（批量推理时必需）")
+    parser.add_argument("--image_path", type=str,
+                        help="单张图片路径（单张图片推理时必需）")
     
     # 模型参数
     parser.add_argument("--backbone", type=str, default="resnet50",
@@ -145,7 +147,7 @@ def parse_args():
     # 路径参数
     parser.add_argument("--save_path", type=str, 
                         help="模型保存路径（训练模式必需）")
-    parser.add_argument("--load_path", type=str, 
+    parser.add_argument("--load_path", type=str, required=True,
                         help="模型加载路径（推理模式必需）")
     parser.add_argument("--output_dir", type=str, default=None,
                         help="推理结果输出目录（推理模式可选）")
@@ -358,6 +360,81 @@ def inference_mode(args):
         LOGGER.info(f"异常样本平均分数: {np.mean(anomaly_scores):.4f} ± {np.std(anomaly_scores):.4f}")
 
 
+def single_image_inference(args):
+    """单张图片推理模式"""
+    # 设置设备
+    device = torch.device(args.device if torch.cuda.is_available() else "cpu")
+    LOGGER.info(f"使用设备: {device}")
+    
+    # 验证必要参数
+    if not args.image_path:
+        LOGGER.error("--image_path 是单张图片推理的必需参数")
+        sys.exit(1)
+    
+    if not os.path.exists(args.image_path):
+        LOGGER.error(f"图片路径不存在: {args.image_path}")
+        sys.exit(1)
+    
+    # 创建输出目录
+    if args.output_dir:
+        os.makedirs(args.output_dir, exist_ok=True)
+    
+    # 加载模型
+    LOGGER.info(f"从 {args.load_path} 加载预训练模型")
+    nn_method = common.FaissNN(False, 4)
+    
+    patchcore_model = patchcore.PatchCore(device)
+    patchcore_model.load_from_path(
+        load_path=args.load_path,
+        device=device,
+        nn_method=nn_method,
+        load_defect_library=False,  # 原始PatchCore不需要缺陷库
+    )
+    
+    # 数据预处理
+    transform = transforms.Compose([
+        transforms.Resize((224, 224)),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+    ])
+    
+    # 加载单张图片
+    LOGGER.info(f"加载图片: {args.image_path}")
+    image = Image.open(args.image_path).convert("RGB")
+    image_tensor = transform(image).unsqueeze(0)  # 添加batch维度
+    
+    # 推理
+    LOGGER.info("开始推理...")
+    scores, masks, defect_types_pred = patchcore_model._predict(image_tensor)
+    
+    # 输出结果
+    score = scores[0]
+    mask = masks[0]
+    
+    LOGGER.info(f"推理完成!")
+    LOGGER.info(f"异常分数: {score:.4f}")
+    
+    # 保存结果
+    if args.output_dir:
+        save_single_image_result(
+            image_path=args.image_path,
+            score=score,
+            mask=mask,
+            output_dir=args.output_dir,
+        )
+        
+        if args.save_visualization:
+            visualize_single_image_result(
+                original_image=image,
+                score=score,
+                mask=mask,
+                output_dir=args.output_dir,
+                filename=os.path.basename(args.image_path),
+            )
+    
+    return score, mask
+
+
 def save_inference_results(test_dataset, scores, masks, labels_gt, masks_gt, output_dir):
     """保存推理结果"""
     output_path = Path(output_dir)
@@ -438,6 +515,56 @@ def visualize_inference_results(test_dataset, scores, masks, output_dir):
     LOGGER.info(f"可视化结果已保存到: {vis_dir}")
 
 
+def save_single_image_result(image_path, score, mask, output_dir):
+    """保存单张图片推理结果"""
+    output_path = Path(output_dir)
+    
+    # 保存汇总
+    summary_path = output_path / "single_image_result.txt"
+    with open(summary_path, "w") as f:
+        f.write("PatchCore Single Image Inference Result\n")
+        f.write("=" * 50 + "\n\n")
+        f.write(f"Image: {image_path}\n")
+        f.write(f"Anomaly Score: {score:.4f}\n")
+    
+    # 保存分割图
+    import matplotlib.pyplot as plt
+    mask_path = output_path / "anomaly_mask.png"
+    plt.imsave(str(mask_path), mask, cmap="hot")
+    
+    LOGGER.info(f"单张图片结果已保存到: {summary_path}")
+    LOGGER.info(f"分割图已保存到: {mask_path}")
+
+
+def visualize_single_image_result(original_image, score, mask, output_dir, filename):
+    """保存单张图片可视化结果"""
+    import matplotlib.pyplot as plt
+    
+    output_path = Path(output_dir)
+    vis_dir = output_path / "visualizations"
+    vis_dir.mkdir(exist_ok=True)
+    
+    # 创建图像
+    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+    
+    axes[0].imshow(original_image)
+    axes[0].set_title(f"Input Image\nScore: {score:.4f}")
+    axes[0].axis("off")
+    
+    axes[1].imshow(mask, cmap="hot")
+    axes[1].set_title("Anomaly Map")
+    axes[1].axis("off")
+    
+    plt.tight_layout()
+    
+    # 保存
+    save_path = vis_dir / filename.replace(".png", "_result.png").replace(".jpg", "_result.jpg")
+    plt.savefig(save_path, dpi=100, bbox_inches="tight")
+    plt.close()
+    
+    LOGGER.info(f"单张图片可视化结果已保存到: {save_path}")
+
+
 def main():
     args = parse_args()
     setup_logging()
@@ -453,7 +580,17 @@ def main():
         if not args.load_path:
             LOGGER.error("推理模式需要指定 --load_path 参数")
             sys.exit(1)
-        inference_mode(args)
+        
+        # 判断是单张图片推理还是批量推理
+        if args.image_path:
+            # 单张图片推理
+            single_image_inference(args)
+        else:
+            # 批量推理（原有逻辑）
+            if not args.data_path or not args.category:
+                LOGGER.error("批量推理需要指定 --data_path 和 --category 参数")
+                sys.exit(1)
+            inference_mode(args)
     else:
         LOGGER.error(f"未知模式: {args.mode}")
         sys.exit(1)
