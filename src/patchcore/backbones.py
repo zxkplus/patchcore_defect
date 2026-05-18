@@ -7,6 +7,7 @@ _BACKBONES = {
     "alexnet": "models.alexnet(pretrained=True)",
     "bninception": 'pretrainedmodels.__dict__["bninception"]'
     '(pretrained="imagenet", num_classes=1000)',
+    "resnet18": "models.resnet18(pretrained=True)",
     "resnet50": "models.resnet50(pretrained=True)",
     "resnet101": "models.resnet101(pretrained=True)",
     "resnext101": "models.resnext101_32x8d(pretrained=True)",
