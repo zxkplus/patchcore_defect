@@ -4,7 +4,6 @@
 支持：
 1. train_defect: 先构建好品库，再构建缺陷库
 2. evaluate_defect: 加载模型，推理，输出分割+分类结果
-3. single_image: 单张图片推理分割和分类
 """
 
 import argparse
@@ -82,8 +81,8 @@ def parse_args():
                               help="Patch 大小")
     
     # 采样参数
-    train_parser.add_argument("--sampler", type=str, default="greedy_coreset",
-                              choices=["identity", "greedy_coreset", "random"],
+    train_parser.add_argument("--sampler", type=str, default="approximate_greedy_coreset",
+                              choices=["identity", "greedy_coreset", "approximate_greedy_coreset", "random"],
                               help="特征采样器类型")
     train_parser.add_argument("--sampler_percentage", type=float, default=0.1,
                               help="采样比例")
@@ -142,29 +141,6 @@ def parse_args():
     eval_parser.add_argument("--verbose", action="store_true",
                              help="详细输出")
     
-    # single_image 子命令
-    single_parser = subparsers.add_parser("single_image", help="单张图片推理")
-    
-    # 模型参数
-    single_parser.add_argument("--model_path", type=str, required=True,
-                               help="模型路径")
-    
-    # 图片参数
-    single_parser.add_argument("--image_path", type=str, required=True,
-                               help="单张图片路径")
-    
-    # 输出参数
-    single_parser.add_argument("--output_dir", type=str, default=None,
-                               help="结果输出目录")
-    single_parser.add_argument("--save_visualization", action="store_true",
-                               help="保存可视化结果")
-    
-    # 设备参数
-    single_parser.add_argument("--device", type=str, default="cuda",
-                              help="计算设备")
-    single_parser.add_argument("--verbose", action="store_true",
-                              help="详细输出")
-    
     return parser.parse_args()
 
 
@@ -186,6 +162,11 @@ def train_defect_command(args):
         featuresampler = sampler.IdentitySampler()
     elif args.sampler == "greedy_coreset":
         featuresampler = sampler.GreedyCoresetSampler(
+            percentage=args.sampler_percentage,
+            device=device,
+        )
+    elif args.sampler == "approximate_greedy_coreset":
+        featuresampler = sampler.ApproximateGreedyCoresetSampler(
             percentage=args.sampler_percentage,
             device=device,
         )
@@ -391,86 +372,6 @@ def evaluate_defect_command(args):
         )
 
 
-def single_image_command(args):
-    """单张图片推理命令"""
-    device = torch.device(args.device if torch.cuda.is_available() else "cpu")
-    LOGGER.info(f"使用设备: {device}")
-    
-    # 验证图片路径
-    if not os.path.exists(args.image_path):
-        LOGGER.error(f"图片路径不存在: {args.image_path}")
-        return
-    
-    # 创建输出目录
-    if args.output_dir:
-        os.makedirs(args.output_dir, exist_ok=True)
-    
-    # 加载模型
-    LOGGER.info(f"加载模型: {args.model_path}")
-    nn_method = common.FaissNN(False, 4)
-    
-    patchcore_model = PatchCore(device)
-    patchcore_model.load_from_path(
-        load_path=args.model_path,
-        device=device,
-        nn_method=nn_method,
-        load_defect_library=True,
-    )
-    
-    # 数据预处理
-    transform = transforms.Compose([
-        transforms.Resize((224, 224)),
-        transforms.ToTensor(),
-        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-    ])
-    
-    # 加载单张图片
-    LOGGER.info(f"加载图片: {args.image_path}")
-    image = Image.open(args.image_path).convert("RGB")
-    image_tensor = transform(image).unsqueeze(0)  # 添加batch维度
-    
-    # 推理
-    LOGGER.info("开始推理...")
-    scores, masks, defect_types_pred = patchcore_model._predict(image_tensor)
-    
-    # 输出结果
-    score = scores[0]
-    mask = masks[0]
-    defect_type = defect_types_pred[0] if defect_types_pred else None
-    
-    LOGGER.info(f"推理完成!")
-    LOGGER.info(f"异常分数: {score:.4f}")
-    
-    # 获取缺陷类型名称
-    defect_type_name = "Normal"
-    if hasattr(patchcore_model, 'defect_library') and patchcore_model.defect_library is not None:
-        if defect_type is not None and defect_type > 0:
-            defect_type_name = patchcore_model.defect_library.defect_id_to_type.get(defect_type, f"Defect_{defect_type}")
-    
-    LOGGER.info(f"预测缺陷类型: {defect_type_name}")
-    
-    # 保存结果
-    if args.output_dir:
-        save_single_image_result(
-            image_path=args.image_path,
-            score=score,
-            mask=mask,
-            defect_type=defect_type,
-            defect_type_name=defect_type_name,
-            output_dir=args.output_dir,
-        )
-        
-        if args.save_visualization:
-            visualize_single_image_result(
-                original_image=image,
-                score=score,
-                mask=mask,
-                defect_type_name=defect_type_name,
-                output_dir=args.output_dir,
-                filename=os.path.basename(args.image_path),
-            )
-
-
 def visualize_results(test_dataset, scores, masks, defect_types_pred, output_dir, defect_library):
     """保存可视化结果"""
     import matplotlib.pyplot as plt
@@ -567,62 +468,6 @@ def save_results(test_dataset, scores, masks, labels_gt, defect_types_pred, outp
     LOGGER.info(f"结果汇总已保存到: {summary_path}")
 
 
-def save_single_image_result(image_path, score, mask, defect_type, defect_type_name, output_dir):
-    """保存单张图片推理结果"""
-    output_path = Path(output_dir)
-    
-    # 保存汇总
-    summary_path = output_path / "single_image_result.txt"
-    with open(summary_path, "w") as f:
-        f.write("PatchCore Defect Single Image Inference Result\n")
-        f.write("=" * 50 + "\n\n")
-        f.write(f"Image: {image_path}\n")
-        f.write(f"Anomaly Score: {score:.4f}\n")
-        f.write(f"Defect Type: {defect_type_name} (ID: {defect_type})\n")
-    
-    # 保存分割图
-    import matplotlib.pyplot as plt
-    mask_path = output_path / "anomaly_mask.png"
-    plt.imsave(str(mask_path), mask, cmap="hot")
-    
-    LOGGER.info(f"单张图片结果已保存到: {summary_path}")
-    LOGGER.info(f"分割图已保存到: {mask_path}")
-
-
-def visualize_single_image_result(original_image, score, mask, defect_type_name, output_dir, filename):
-    """保存单张图片可视化结果"""
-    import matplotlib.pyplot as plt
-    
-    output_path = Path(output_dir)
-    vis_dir = output_path / "visualizations"
-    vis_dir.mkdir(exist_ok=True)
-    
-    # 创建图像
-    fig, axes = plt.subplots(1, 3, figsize=(15, 5))
-    
-    axes[0].imshow(original_image)
-    axes[0].set_title(f"Input Image\nScore: {score:.4f}")
-    axes[0].axis("off")
-    
-    axes[1].imshow(mask, cmap="hot")
-    axes[1].set_title("Anomaly Map")
-    axes[1].axis("off")
-    
-    axes[2].text(0.5, 0.5, f"Predicted:\n{defect_type_name}",
-                ha="center", va="center", fontsize=16,
-                transform=axes[2].transAxes)
-    axes[2].axis("off")
-    
-    plt.tight_layout()
-    
-    # 保存
-    save_path = vis_dir / filename.replace(".png", "_result.png").replace(".jpg", "_result.jpg")
-    plt.savefig(save_path, dpi=100, bbox_inches="tight")
-    plt.close()
-    
-    LOGGER.info(f"单张图片可视化结果已保存到: {save_path}")
-
-
 def main():
     args = parse_args()
     setup_logging(args.verbose if hasattr(args, 'verbose') else False)
@@ -631,10 +476,8 @@ def main():
         train_defect_command(args)
     elif args.command == "evaluate_defect":
         evaluate_defect_command(args)
-    elif args.command == "single_image":
-        single_image_command(args)
     else:
-        LOGGER.error("请指定命令: train_defect、evaluate_defect 或 single_image")
+        LOGGER.error("请指定命令: train_defect 或 evaluate_defect")
         sys.exit(1)
 
 
