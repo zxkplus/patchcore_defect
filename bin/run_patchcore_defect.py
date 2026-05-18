@@ -81,8 +81,8 @@ def parse_args():
                               help="Patch 大小")
     
     # 采样参数
-    train_parser.add_argument("--sampler", type=str, default="greedy_coreset",
-                              choices=["identity", "greedy_coreset", "random"],
+    train_parser.add_argument("--sampler", type=str, default="approximate_greedy_coreset",
+                              choices=["identity", "greedy_coreset", "approximate_greedy_coreset", "random"],
                               help="特征采样器类型")
     train_parser.add_argument("--sampler_percentage", type=float, default=0.1,
                               help="采样比例")
@@ -162,6 +162,11 @@ def train_defect_command(args):
         featuresampler = sampler.IdentitySampler()
     elif args.sampler == "greedy_coreset":
         featuresampler = sampler.GreedyCoresetSampler(
+            percentage=args.sampler_percentage,
+            device=device,
+        )
+    elif args.sampler == "approximate_greedy_coreset":
+        featuresampler = sampler.ApproximateGreedyCoresetSampler(
             percentage=args.sampler_percentage,
             device=device,
         )
@@ -337,7 +342,10 @@ def evaluate_defect_command(args):
     LOGGER.info(f"推理完成，共 {len(scores)} 个样本")
     
     # 统计结果
-    defect_types = patchcore_model.get_defect_types()
+    if hasattr(patchcore_model, 'defect_library') and patchcore_model.defect_library is not None:
+        defect_types = patchcore_model.defect_library.get_defect_types()
+    else:
+        defect_types = []
     LOGGER.info(f"检测到的缺陷类型: {defect_types}")
     
     # 保存可视化结果
@@ -389,8 +397,18 @@ def visualize_results(test_dataset, scores, masks, defect_types_pred, output_dir
         # 获取预测的缺陷类型
         defect_type = defect_types_pred[i]
         defect_type_name = "Normal"
-        if defect_library and defect_type > 0:
-            defect_type_name = defect_library.defect_id_to_type.get(defect_type, f"Defect_{defect_type}")
+        # 处理defect_type可能是数组的情况
+        if defect_library and defect_type is not None:
+            if isinstance(defect_type, np.ndarray):
+                # 如果是数组，找到最频繁的非零缺陷类型
+                non_zero_types = defect_type[defect_type > 0]
+                if len(non_zero_types) > 0:
+                    # 找到出现次数最多的缺陷类型
+                    unique_types, counts = np.unique(non_zero_types, return_counts=True)
+                    most_frequent_type = unique_types[np.argmax(counts)]
+                    defect_type_name = defect_library.defect_id_to_type.get(most_frequent_type, f"Defect_{most_frequent_type}")
+            elif defect_type > 0:  # 如果是标量
+                defect_type_name = defect_library.defect_id_to_type.get(defect_type, f"Defect_{defect_type}")
         
         # 创建图像
         fig, axes = plt.subplots(1, 3, figsize=(15, 5))
