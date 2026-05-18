@@ -219,6 +219,10 @@ class DualLibraryScorer:
         else:
             batch_size = patch_scores.shape[0]
             
+        # 计算实际的patch数量
+        total_patches = patch_scores.shape[1]
+        
+        # 尝试使用提供的patch_shapes[0]进行重塑
         patch_shape = patch_shapes[0] if patch_shapes else (1, 1)
         h, w = patch_shape
         
@@ -227,11 +231,26 @@ class DualLibraryScorer:
             patch_scores_reshaped = patch_scores.reshape(batch_size, h, w)
         except ValueError:
             LOGGER.warning(f"无法将分数重塑为形状 ({batch_size}, {h}, {w})，当前形状 {patch_scores.shape}")
-            #  fallback: 假设已经是扁平的或者处理错误
-            patch_scores_reshaped = patch_scores.reshape(batch_size, -1)
-            if patch_scores_reshaped.shape[1] != h * w:
-                 # 如果还是不匹配，可能需要调整逻辑，这里暂时假设能匹配
-                 pass
+            # fallback: 根据实际patch数量计算合理的网格尺寸
+            # 假设网格是正方形或接近正方形
+            import math
+            grid_size = int(math.sqrt(total_patches))
+            if grid_size * grid_size == total_patches:
+                # 完美正方形
+                patch_scores_reshaped = patch_scores.reshape(batch_size, grid_size, grid_size)
+                h, w = grid_size, grid_size
+            elif (grid_size + 1) * grid_size == total_patches:
+                # 矩形网格
+                patch_scores_reshaped = patch_scores.reshape(batch_size, grid_size + 1, grid_size)
+                h, w = grid_size + 1, grid_size
+            elif grid_size * (grid_size + 1) == total_patches:
+                # 矩形网格
+                patch_scores_reshaped = patch_scores.reshape(batch_size, grid_size, grid_size + 1)
+                h, w = grid_size, grid_size + 1
+            else:
+                # 最后的fallback：使用1D reshape，然后在插值时处理
+                patch_scores_reshaped = patch_scores.reshape(batch_size, 1, total_patches)
+                h, w = 1, total_patches
 
         # 上采样到目标大小（双线性插值）
         segmentation_maps = []
@@ -242,7 +261,13 @@ class DualLibraryScorer:
             else:
                 ps_tensor = ps
             
-            ps_tensor = ps_tensor.unsqueeze(0).unsqueeze(0).float()
+            # 确保tensor有正确的维度用于插值
+            if ps_tensor.dim() == 1:
+                ps_tensor = ps_tensor.unsqueeze(0).unsqueeze(0).float()
+            elif ps_tensor.dim() == 2:
+                ps_tensor = ps_tensor.unsqueeze(0).unsqueeze(0).float()
+            else:
+                ps_tensor = ps_tensor.unsqueeze(0).float()
             
             if target_size is not None:
                 ps_up = F.interpolate(ps_tensor, size=target_size, mode="bilinear", align_corners=False)
@@ -275,15 +300,53 @@ class DualLibraryScorer:
         Returns:
             缺陷类型图列表
         """
-        batch_size = len(patch_shapes)
-        patch_shape = patch_shapes[0]
+        # 确定batch size - 从defect_labels推断而不是patch_shapes长度
+        if defect_labels.ndim == 1:
+            # 单个样本的情况
+            batch_size = 1
+            total_elements = defect_labels.shape[0]
+        else:
+            batch_size = defect_labels.shape[0]
+            total_elements = defect_labels.shape[1] if defect_labels.ndim == 2 else defect_labels.shape[0]
+        
+        # 使用第一个patch_shape作为参考
+        patch_shape = patch_shapes[0] if patch_shapes else (1, 1)
         h, w = patch_shape
         
-        # 重塑标签
-        if defect_labels.ndim > 1:
-            defect_labels = defect_labels.squeeze()
+        # 验证元素数量是否匹配
+        expected_elements = h * w
+        if total_elements != expected_elements:
+            # 如果不匹配，尝试根据实际元素数量计算合理的网格尺寸
+            import math
+            grid_size = int(math.sqrt(total_elements))
+            if grid_size * grid_size == total_elements:
+                h, w = grid_size, grid_size
+            elif (grid_size + 1) * grid_size == total_elements:
+                h, w = grid_size + 1, grid_size
+            elif grid_size * (grid_size + 1) == total_elements:
+                h, w = grid_size, grid_size + 1
+            else:
+                # 最后的fallback：使用1D reshape
+                h, w = 1, total_elements
         
-        labels_reshaped = defect_labels.reshape(batch_size, h, w)
+        # 重塑标签
+        if defect_labels.ndim > 1 and defect_labels.shape[0] == 1:
+            defect_labels = defect_labels.squeeze(0)
+        elif defect_labels.ndim > 1:
+            # 多batch情况
+            pass
+        elif defect_labels.ndim == 1 and batch_size == 1:
+            # 确保是正确的形状
+            defect_labels = defect_labels.reshape(h, w)
+            labels_reshaped = defect_labels[np.newaxis, :, :]  # 添加batch维度
+        else:
+            defect_labels = defect_labels.reshape(batch_size, h, w)
+            labels_reshaped = defect_labels
+        
+        if defect_labels.ndim == 2:
+            labels_reshaped = defect_labels[np.newaxis, :, :]
+        else:
+            labels_reshaped = defect_labels
         
         # 上采样到目标大小（最近邻插值，保持类别标签）
         if target_size is not None:
